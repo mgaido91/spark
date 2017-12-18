@@ -23,7 +23,7 @@ import scala.reflect.runtime.universe.typeTag
 
 import org.apache.spark.annotation.InterfaceStability
 import org.apache.spark.sql.AnalysisException
-import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.expressions.{Expression, Literal}
 
 
 /**
@@ -134,6 +134,17 @@ object DecimalType extends AbstractDataType {
     case LongType => LongDecimal
     case FloatType => FloatDecimal
     case DoubleType => DoubleDecimal
+  }
+
+  private[sql] def forLiteral(literal: Literal): DecimalType = literal.value match {
+    case v: Short => fromBigDecimal(BigDecimal(v))
+    case v: Int => fromBigDecimal(BigDecimal(v))
+    case v: Long => fromBigDecimal(BigDecimal(v))
+    case _ => forType(literal.dataType)
+  }
+
+  private[sql] def fromBigDecimal(d: BigDecimal): DecimalType = {
+    DecimalType(Math.max(d.precision, d.scale), d.scale)
   }
 
   private[sql] def bounded(precision: Int, scale: Int): DecimalType = {

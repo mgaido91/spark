@@ -81,7 +81,8 @@ object DecimalPrecision extends TypeCoercionRule {
   override protected def coerceTypes(plan: LogicalPlan): LogicalPlan = plan transformUp {
     // fix decimal precision for expressions
     case q => q.transformExpressionsUp(
-      decimalAndDecimal.orElse(integralAndDecimalLiteral).orElse(nondecimalAndDecimal))
+      decimalAndDecimal.orElse(integralAndDecimalLiteral).orElse(nondecimalLiteralAndDecimal)
+        .orElse(nondecimalAndDecimal))
   }
 
   /** Decimal precision promotion for +, -, *, /, %, pmod, and binary comparison. */
@@ -254,6 +255,24 @@ object DecimalPrecision extends TypeCoercionRule {
           b.makeCopy(Array(Cast(left, DoubleType), right))
         case _ =>
           b
+      }
+  }
+
+  /**
+   * Type coercion for BinaryOperator in which one side is a non-decimal literal numeric, and the
+   * other side is a decimal.
+   */
+  private val nondecimalLiteralAndDecimal: PartialFunction[Expression, Expression] = {
+    // Promote integers inside a binary expression with fixed-precision decimals to decimals,
+    // and fixed-precision decimals in an expression with floats / doubles to doubles
+    case b @ BinaryOperator(left, right) if left.dataType != right.dataType =>
+      (left, right) match {
+        case (l: Literal, r) if r.dataType.isInstanceOf[DecimalType]
+            && l.dataType.isInstanceOf[IntegralType] =>
+          b.makeCopy(Array(Cast(left, DecimalType.forLiteral(l)), right))
+        case (l, r: Literal) if l.dataType.isInstanceOf[DecimalType]
+          && r.dataType.isInstanceOf[IntegralType] =>
+          b.makeCopy(Array(left, Cast(right, DecimalType.forLiteral(r))))
       }
   }
 }
