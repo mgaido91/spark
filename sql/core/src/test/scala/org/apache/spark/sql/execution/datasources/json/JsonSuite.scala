@@ -2048,7 +2048,7 @@ class JsonSuite extends QueryTest with SharedSQLContext with TestJsonData {
     val cars = sqlContext.read
       .option("multiLine", true)
       .option("mode", PermissiveMode.name)
-      .json(testFile)
+      .json(testFile).cache()
     assert(cars.count() == 5)
     assert(cars.where($"_corrupt_record".isNotNull).count() == 3)
   }
