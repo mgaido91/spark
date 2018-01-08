@@ -2057,7 +2057,7 @@ class JsonSuite extends QueryTest with SharedSQLContext with TestJsonData {
     val testFile = Thread.currentThread().getContextClassLoader
       .getResource("test-data/cars-malformed.json").toString
     val ex = intercept[SparkException] {
-      val cars = sqlContext.read
+      sqlContext.read
         .option("multiLine", true)
         .option("mode", FailFastMode.name)
         .json(testFile)
