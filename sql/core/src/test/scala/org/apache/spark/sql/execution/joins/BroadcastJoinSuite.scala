@@ -19,7 +19,7 @@ package org.apache.spark.sql.execution.joins
 
 import scala.reflect.ClassTag
 
-import org.apache.spark.AccumulatorSuite
+import org.apache.spark.{AccumulatorSuite, SparkEnv}
 import org.apache.spark.sql.{Dataset, QueryTest, Row, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.{BitwiseAnd, BitwiseOr, Cast, Literal, ShiftLeft}
 import org.apache.spark.sql.execution.{SparkPlan, WholeStageCodegenExec}
@@ -150,6 +150,20 @@ class BroadcastJoinSuite extends QueryTest with SQLTestUtils {
         spark.catalog.clearCache()
       }
     }
+  }
+
+  test("SPARK-22575: remove allocated blocks when they are not needed anymore") {
+    val df1 = Seq((1, "4"), (2, "2")).toDF("key", "value")
+    val df2 = Seq((1, "1"), (2, "2")).toDF("key", "value")
+    val df3 = df1.join(broadcast(df2), Seq("key"), "inner")
+    val numBroadCastHashJoin = df3.queryExecution.executedPlan.collect {
+      case b: BroadcastHashJoinExec => b
+    }.size
+    df3.collect()
+    assert(numBroadCastHashJoin > 0)
+    df3.destroy()
+    val blocks = SparkEnv.get.blockManager.master.getMatchingBlockIds(_.isBroadcast, false)
+    assert(blocks.isEmpty)
   }
 
   test("broadcast hint isn't propagated after a join") {

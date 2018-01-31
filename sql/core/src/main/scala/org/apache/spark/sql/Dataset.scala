@@ -3165,6 +3165,20 @@ class Dataset[T] private[sql](
     files.toSet.toArray
   }
 
+  /**
+   * Frees resources which might be allocated by the Dataset.
+   * Calling this method is not necessary, but it can be useful to avoid resource leaking in
+   * long-running applications (especially if dynamic allocation is turned on).
+   *
+   * After calling this method, any attempt to use this Dataset can lead to unexpected errors.
+   *
+   * @group basic
+   * @since 2.4.0
+   */
+  def destroy(): Unit = {
+    queryExecution.executedPlan.cleanUpResources()
+  }
+
   ////////////////////////////////////////////////////////////////////////////
   // For Python API
   ////////////////////////////////////////////////////////////////////////////
