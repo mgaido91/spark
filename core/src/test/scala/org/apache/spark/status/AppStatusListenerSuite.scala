@@ -215,7 +215,7 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
       check[TaskDataWrapper](task.taskId) { wrapper =>
         assert(wrapper.taskId === task.taskId)
         assert(wrapper.stageId === stages.head.stageId)
-        assert(wrapper.stageAttemptId === stages.head.attemptId)
+        assert(wrapper.stageAttemptId === stages.head.attemptNumber)
         assert(wrapper.index === task.index)
         assert(wrapper.attempt === task.attemptNumber)
         assert(wrapper.launchTime === task.launchTime)
@@ -258,7 +258,7 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
       executorId = execIds.head,
       taskFailures = 2,
       stageId = stages.head.stageId,
-      stageAttemptId = stages.head.attemptId))
+      stageAttemptId = stages.head.attemptNumber))
 
     val executorStageSummaryWrappers =
       store.view(classOf[ExecutorStageSummaryWrapper]).index("stage")
@@ -280,7 +280,7 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
       hostId = "2.example.com", // this is where the second executor is hosted
       executorFailures = 1,
       stageId = stages.head.stageId,
-      stageAttemptId = stages.head.attemptId))
+      stageAttemptId = stages.head.attemptNumber))
 
     val executorStageSummaryWrappersForNode =
       store.view(classOf[ExecutorStageSummaryWrapper]).index("stage")
@@ -942,17 +942,17 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
     // task end event.
     time += 1
     val task = createTasks(1, Array("1")).head
-    listener.onTaskStart(SparkListenerTaskStart(dropped.stageId, dropped.attemptId, task))
+    listener.onTaskStart(SparkListenerTaskStart(dropped.stageId, dropped.attemptNumber, task))
 
     time += 1
     task.markFinished(TaskState.FINISHED, time)
     val metrics = TaskMetrics.empty
     metrics.setExecutorRunTime(42L)
-    listener.onTaskEnd(SparkListenerTaskEnd(dropped.stageId, dropped.attemptId,
+    listener.onTaskEnd(SparkListenerTaskEnd(dropped.stageId, dropped.attemptNumber,
       "taskType", Success, task, metrics))
 
     new AppStatusStore(store)
-      .taskSummary(dropped.stageId, dropped.attemptId, Array(0.25d, 0.50d, 0.75d))
+      .taskSummary(dropped.stageId, dropped.attemptNumber, Array(0.25d, 0.50d, 0.75d))
     assert(store.count(classOf[CachedQuantile], "stage", key(dropped)) === 3)
 
     stages.drop(1).foreach { s =>
@@ -1085,12 +1085,12 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
     // Stop task 2 before task 1
     time += 1
     tasks(1).markFinished(TaskState.FINISHED, time)
-    listener.onTaskEnd(
-      SparkListenerTaskEnd(stage1.stageId, stage1.attemptId, "taskType", Success, tasks(1), null))
+    listener.onTaskEnd(SparkListenerTaskEnd(
+      stage1.stageId, stage1.attemptNumber, "taskType", Success, tasks(1), null))
     time += 1
     tasks(0).markFinished(TaskState.FINISHED, time)
-    listener.onTaskEnd(
-      SparkListenerTaskEnd(stage1.stageId, stage1.attemptId, "taskType", Success, tasks(0), null))
+    listener.onTaskEnd(SparkListenerTaskEnd(
+      stage1.stageId, stage1.attemptNumber, "taskType", Success, tasks(0), null))
 
     // Start task 3 and task 2 should be evicted.
     listener.onTaskStart(SparkListenerTaskStart(stage1.stageId, stage1.attemptNumber, tasks(2)))

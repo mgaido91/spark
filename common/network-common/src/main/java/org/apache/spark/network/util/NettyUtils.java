@@ -111,24 +111,39 @@ public class NettyUtils {
     }
     return new PooledByteBufAllocator(
       allowDirectBufs && PlatformDependent.directBufferPreferred(),
-      Math.min(getPrivateStaticField("DEFAULT_NUM_HEAP_ARENA"), numCores),
-      Math.min(getPrivateStaticField("DEFAULT_NUM_DIRECT_ARENA"), allowDirectBufs ? numCores : 0),
-      getPrivateStaticField("DEFAULT_PAGE_SIZE"),
-      getPrivateStaticField("DEFAULT_MAX_ORDER"),
-      allowCache ? getPrivateStaticField("DEFAULT_TINY_CACHE_SIZE") : 0,
-      allowCache ? getPrivateStaticField("DEFAULT_SMALL_CACHE_SIZE") : 0,
-      allowCache ? getPrivateStaticField("DEFAULT_NORMAL_CACHE_SIZE") : 0
+      Math.min(getIntPrivateStaticField("DEFAULT_NUM_HEAP_ARENA"), numCores),
+      Math.min(getIntPrivateStaticField("DEFAULT_NUM_DIRECT_ARENA"),
+          allowDirectBufs ? numCores : 0),
+      getIntPrivateStaticField("DEFAULT_PAGE_SIZE"),
+      getIntPrivateStaticField("DEFAULT_MAX_ORDER"),
+      allowCache ? getIntPrivateStaticField("DEFAULT_TINY_CACHE_SIZE") : 0,
+      allowCache ? getIntPrivateStaticField("DEFAULT_SMALL_CACHE_SIZE") : 0,
+      allowCache ? getIntPrivateStaticField("DEFAULT_NORMAL_CACHE_SIZE") : 0,
+      allowCache ? getBoolPrivateStaticField("DEFAULT_USE_CACHE_FOR_ALL_THREADS") : false
     );
   }
 
-  /** Used to get defaults from Netty's private static fields. */
-  private static int getPrivateStaticField(String name) {
+  /** Used to get defaults from Netty's private int static fields. */
+  private static int getIntPrivateStaticField(String name) {
     try {
-      Field f = PooledByteBufAllocator.DEFAULT.getClass().getDeclaredField(name);
-      f.setAccessible(true);
-      return f.getInt(null);
+      return getPrivateStaticField(name).getInt(null);
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
+  }
+
+  /** Used to get defaults from Netty's private boolean static fields. */
+  private static boolean getBoolPrivateStaticField(String name) {
+    try {
+      return getPrivateStaticField(name).getBoolean(null);
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  private static Field getPrivateStaticField(String name) throws Exception {
+    Field f = PooledByteBufAllocator.DEFAULT.getClass().getDeclaredField(name);
+    f.setAccessible(true);
+    return f;
   }
 }

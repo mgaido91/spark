@@ -108,8 +108,8 @@ public class JavaMetastoreDataSourcesSuite {
       sqlContext.sql("SELECT * FROM javaSavedTable"),
       df.collectAsList());
 
-    Dataset<Row> loadedDF =
-      sqlContext.createExternalTable("externalTable", "org.apache.spark.sql.json", options);
+    Dataset<Row> loadedDF = sqlContext.sparkSession().catalog()
+        .createTable("externalTable", "org.apache.spark.sql.json", options);
 
     checkAnswer(loadedDF, df.collectAsList());
     checkAnswer(
@@ -134,8 +134,8 @@ public class JavaMetastoreDataSourcesSuite {
     List<StructField> fields = new ArrayList<>();
     fields.add(DataTypes.createStructField("b", DataTypes.StringType, true));
     StructType schema = DataTypes.createStructType(fields);
-    Dataset<Row> loadedDF =
-      sqlContext.createExternalTable("externalTable", "org.apache.spark.sql.json", schema, options);
+    Dataset<Row> loadedDF = sqlContext.sparkSession().catalog()
+        .createTable("externalTable", "org.apache.spark.sql.json", schema, options);
 
     checkAnswer(
       loadedDF,

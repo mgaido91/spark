@@ -73,7 +73,7 @@ class MultiDatabaseSuite extends QueryTest with SQLTestUtils with TestHiveSingle
           val path = dir.getCanonicalPath
           df.write.format("parquet").mode(SaveMode.Overwrite).save(path)
 
-          spark.catalog.createExternalTable("t", path, "parquet")
+          spark.catalog.createTable("t", path, "parquet")
           assert(getTableNames(Option(db)).contains("t"))
           checkAnswer(spark.table("t"), df)
 
@@ -97,7 +97,7 @@ class MultiDatabaseSuite extends QueryTest with SQLTestUtils with TestHiveSingle
       withTempPath { dir =>
         val path = dir.getCanonicalPath
         df.write.format("parquet").mode(SaveMode.Overwrite).save(path)
-        spark.catalog.createExternalTable(s"$db.t", path, "parquet")
+        spark.catalog.createTable(s"$db.t", path, "parquet")
 
         assert(getTableNames(Option(db)).contains("t"))
         checkAnswer(spark.table(s"$db.t"), df)
