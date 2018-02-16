@@ -111,13 +111,18 @@ public class OrcColumnarBatchReader extends RecordReader<Void, ColumnarBatch> {
 
   @Override
   public void close() throws IOException {
-    if (columnarBatch != null) {
-      columnarBatch.close();
-      columnarBatch = null;
-    }
-    if (recordReader != null) {
-      recordReader.close();
-      recordReader = null;
+    // SPARK-23399: in case any unexpected exception happens, we still need to close the
+    // recordReader in order to prevent resources' leakage
+    try {
+      if (columnarBatch != null) {
+        columnarBatch.close();
+        columnarBatch = null;
+      }
+    } finally {
+      if (recordReader != null) {
+        recordReader.close();
+        recordReader = null;
+      }
     }
   }
 

@@ -21,6 +21,7 @@ import java.io.Closeable
 
 import org.apache.hadoop.mapreduce.RecordReader
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 
 /**
@@ -29,8 +30,8 @@ import org.apache.spark.sql.catalyst.InternalRow
  * Note that this returns [[Object]]s instead of [[InternalRow]] because we rely on erasure to pass
  * column batches by pretending they are rows.
  */
-class RecordReaderIterator[T](
-    private[this] var rowReader: RecordReader[_, T]) extends Iterator[T] with Closeable {
+class RecordReaderIterator[T](private[this] var rowReader: RecordReader[_, T])
+    extends Iterator[T] with Closeable with Logging {
   private[this] var havePair = false
   private[this] var finished = false
 
@@ -60,6 +61,8 @@ class RecordReaderIterator[T](
     if (rowReader != null) {
       try {
         rowReader.close()
+      } catch {
+        case e: Exception => logWarning("Error while closing rowReader", e)
       } finally {
         rowReader = null
       }
