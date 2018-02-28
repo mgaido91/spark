@@ -430,6 +430,10 @@ case class View(
   override def simpleString: String = {
     s"View (${desc.identifier}, ${output.mkString("[", ",", "]")})"
   }
+
+  override def simpleStringLeaf: String = {
+    s"View (${desc.identifier}, ${output.map(_.stringWithType).mkString("[", ",", "]")})"
+  }
 }
 
 /**
