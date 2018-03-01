@@ -628,7 +628,9 @@ class SQLContext private[sql](val sparkSession: SparkSession)
    * @since 1.3.0
    */
   def dropTempTable(tableName: String): Unit = {
-    sparkSession.catalog.dropTempView(tableName)
+    if (!sparkSession.catalog.dropTempView(tableName)) {
+      throw new IllegalArgumentException(s"$tableName could not be dropped.")
+    }
   }
 
   /**
