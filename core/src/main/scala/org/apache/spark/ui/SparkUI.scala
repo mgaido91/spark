@@ -109,7 +109,7 @@ private[spark] class SparkUI private (
     }
   }
 
-  def getApplicationInfoList: Iterator[ApplicationInfo] = {
+  def getApplicationInfoList(user: Option[String]): Iterator[ApplicationInfo] = {
     Iterator(new ApplicationInfo(
       id = appId,
       name = appName,
