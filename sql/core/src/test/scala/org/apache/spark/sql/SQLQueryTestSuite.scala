@@ -27,6 +27,7 @@ import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.RuleExecutor
 import org.apache.spark.sql.catalyst.util.{fileToString, stringToFile}
 import org.apache.spark.sql.execution.command.{DescribeColumnCommand, DescribeTableCommand}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.sql.types.StructType
 
@@ -103,12 +104,22 @@ class SQLQueryTestSuite extends QueryTest with SharedSQLContext {
     ".DS_Store"       // A meta-file that may be created on Mac by Finder App.
                       // We should ignore this file from processing.
   )
+  /**
+   * Maps a test with the set of configurations it has to run with and a flag indicating whether
+   * the output must be the same with different configs or it has to be different.
+   */
+  private val testConfigs: Map[String, (Seq[Seq[(String, String)]], Boolean)] = Map(
+    "typeCoercion/native/decimalArithmeticOperations.sql" ->
+      (Seq(Seq(SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS.key -> "true"),
+        Seq(SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS.key -> "false")) -> false)
+  )
 
   // Create all the test cases.
   listTestCases().foreach(createScalaTestCase)
 
   /** A test case. */
-  private case class TestCase(name: String, inputFile: String, resultFile: String)
+  private case class TestCase(
+    name: String, inputFile: String, resultFile: String, configs: Seq[(String, String)])
 
   /** A single SQL query's output. */
   private case class QueryOutput(sql: String, schema: String, output: String) {
@@ -138,11 +149,14 @@ class SQLQueryTestSuite extends QueryTest with SharedSQLContext {
   private def runTest(testCase: TestCase): Unit = {
     val input = fileToString(new File(testCase.inputFile))
 
+    // The list of set operation to perform in order to add the desired configs
+    val setOperations = testCase.configs.map { case (key, value) => s"set $key=$value" }
+
     // List of SQL queries to run
     val queries: Seq[String] = {
       val cleaned = input.split("\n").filterNot(_.startsWith("--")).mkString("\n")
       // note: this is not a robust way to split queries using semicolon, but works for now.
-      cleaned.split("(?<=[^\\\\]);").map(_.trim).filter(_ != "").toSeq
+      setOperations ++ cleaned.split("(?<=[^\\\\]);").map(_.trim).filter(_ != "").toSeq
     }
 
     // Create a local SparkSession to have stronger isolation between different test cases.
@@ -250,11 +264,25 @@ class SQLQueryTestSuite extends QueryTest with SharedSQLContext {
   }
 
   private def listTestCases(): Seq[TestCase] = {
-    listFilesRecursively(new File(inputFilePath)).map { file =>
-      val resultFile = file.getAbsolutePath.replace(inputFilePath, goldenFilePath) + ".out"
-      val absPath = file.getAbsolutePath
-      val testCaseName = absPath.stripPrefix(inputFilePath).stripPrefix(File.separator)
-      TestCase(testCaseName, absPath, resultFile)
+    listFilesRecursively(new File(inputFilePath)).flatMap { file =>
+      testCases(file.getAbsolutePath)
+    }
+  }
+
+  private def testCases(inputPath: String): Seq[TestCase] = {
+    val baseResultFileName = inputPath.replace(inputFilePath, goldenFilePath)
+    val testCaseName = inputPath.stripPrefix(inputFilePath).stripPrefix(File.separator)
+    testConfigs.get(testCaseName) match {
+      case None => Seq(TestCase(testCaseName, inputPath, s"$baseResultFileName.out", Seq.empty))
+      case Some((listOfConfigs, hasSameResults)) => listOfConfigs.map { configs =>
+        val configsSuffix = configs.map { case (key, value) => s"$key-$value" }.mkString("_")
+        val resultFile = if (hasSameResults) {
+          s"$baseResultFileName.out"
+        } else {
+          s"${baseResultFileName}_$configsSuffix.out"
+        }
+        TestCase(s"${testCaseName}_$configsSuffix", inputPath, resultFile, configs)
+      }
     }
   }
 
