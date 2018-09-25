@@ -215,7 +215,9 @@ private[spark] class Client(
       }
     }
 
-    if (isClusterMode && principal != null && keytab != null) {
+    // The keytab is on the local file system only when no proxy-user is set. So a further check is
+    // required.
+    if (isClusterMode && principal != null && keytab != null && new File(keytab).exists()) {
       val newUgi = UserGroupInformation.loginUserFromKeytabAndReturnUGI(principal, keytab)
       newUgi.doAs(new PrivilegedExceptionAction[Unit] {
         override def run(): Unit = {

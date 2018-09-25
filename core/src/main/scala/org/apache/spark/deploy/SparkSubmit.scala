@@ -338,14 +338,31 @@ private[spark] class SparkSubmit extends Logging {
     if (clusterManager == YARN || clusterManager == LOCAL || isMesosClient) {
       if (args.principal != null) {
         if (args.keytab != null) {
-          require(new File(args.keytab).exists(), s"Keytab file: ${args.keytab} does not exist")
+          val keytabExists = if (args.proxyUser != null) {
+            val uri = Utils.resolveURI(args.keytab)
+            require(!Seq("file", "local").contains(uri.getScheme),
+              s"Keytab file: ${args.keytab} is a local file when proxy-user is enabled. " +
+                "Giving permissions to read the keytab of the impersonated user to the " +
+                "impersontaing user is a security risk, so it is not allowed.")
+            val fs = FileSystem.get(uri, hadoopConf)
+            val ugi = UserGroupInformation.createProxyUser(args.proxyUser,
+              UserGroupInformation.getCurrentUser)
+            ugi.doAs(new PrivilegedExceptionAction[Boolean] {
+              override def run(): Boolean = fs.exists(new Path(uri))
+            })
+          } else {
+            new File(args.keytab).exists()
+          }
+          require(keytabExists, s"Keytab file: ${args.keytab} does not exist")
           // Add keytab and principal configurations in sysProps to make them available
           // for later use; e.g. in spark sql, the isolated class loader used to talk
           // to HiveMetastore will use these settings. They will be set as Java system
           // properties and then loaded by SparkConf
           sparkConf.set(KEYTAB, args.keytab)
           sparkConf.set(PRINCIPAL, args.principal)
-          UserGroupInformation.loginUserFromKeytab(args.principal, args.keytab)
+          if (args.proxyUser == null) {
+            UserGroupInformation.loginUserFromKeytab(args.principal, args.keytab)
+          }
         }
       }
     }
