@@ -49,6 +49,8 @@ abstract class Optimizer(sessionCatalog: SessionCatalog)
 
   protected def fixedPoint = FixedPoint(SQLConf.get.optimizerMaxIterations)
 
+  final private[catalyst] lazy val expressionOptimizer = new ExpressionOptimizer(this)
+
   /**
    * Defines the default rule batches in the Optimizer.
    *
@@ -188,7 +190,8 @@ abstract class Optimizer(sessionCatalog: SessionCatalog)
       CollapseProject,
       RemoveNoopOperators) :+
     // This batch must be executed after the `RewriteSubquery` batch, which creates joins.
-    Batch("NormalizeFloatingNumbers", Once, NormalizeFloatingNumbers)
+    Batch("NormalizeFloatingNumbers", Once, NormalizeFloatingNumbers) :+
+    Batch("OptimizeAggregationExpressions", Once, OptimizeAggregationExpressions(this))
   }
 
   /**
@@ -317,6 +320,41 @@ class SimpleTestOptimizer extends Optimizer(
     new InMemoryCatalog,
     EmptyFunctionRegistry,
     new SQLConf().copy(SQLConf.CASE_SENSITIVE -> true)))
+
+
+class ExpressionsOptimizationException(msg: String, exprs: Seq[Expression])
+    extends Exception(msg, null) {
+  override def getMessage: String = {
+    s"${super.getMessage}, expressions:\n - ${exprs.mkString("\n - ")}"
+  }
+}
+
+/**
+ * An optimizer used for expressions optimization.
+ */
+class ExpressionOptimizer(optimizer: Optimizer) extends RuleExecutor[Expression] {
+
+  private case class ExpressionRule(opt: ExpressionOptimizerRule) extends Rule[Expression] {
+    override def apply(expr: Expression): Expression = opt.applyOnExpression(expr)
+  }
+
+  def batches: Seq[Batch] = {
+    optimizer.batches.flatMap { b =>
+      val exprRules = b.rules.filter(_.isInstanceOf[ExpressionOptimizerRule])
+        .map(opt => ExpressionRule(opt.asInstanceOf[ExpressionOptimizerRule]))
+      if (exprRules.isEmpty) {
+        None
+      } else {
+        val strategy = if (b.strategy.maxIterations == 1) {
+          Once
+        } else {
+          FixedPoint(b.strategy.maxIterations)
+        }
+        Option(Batch(b.name, strategy, exprRules: _*))
+      }
+    }
+  }
+}
 
 /**
  * Remove redundant aliases from a query plan. A redundant alias is an alias that does not change
@@ -1756,5 +1794,21 @@ object OptimizeLimitZero extends Rule[LogicalPlan] {
     // Replace Local Limit 0 nodes with empty Local Relation
     case ll @ LocalLimit(IntegerLiteral(0), _) =>
       empty(ll)
+  }
+}
+
+
+case class OptimizeAggregationExpressions(optimizer: Optimizer) extends Rule[LogicalPlan] {
+  def apply(plan: LogicalPlan): LogicalPlan = plan transformAllExpressions {
+    case da: DeclarativeAggregate =>
+      val optimized = da.updateExpressions.map(optimizer.expressionOptimizer.execute)
+      val unchanged = optimized.zip(da.updateExpressions).forall { case (opt, old) =>
+        opt.semanticEquals(old)
+      }
+      if (unchanged) {
+        da
+      } else {
+        WrappedDeclarativeAggregate(da, optimized)
+      }
   }
 }

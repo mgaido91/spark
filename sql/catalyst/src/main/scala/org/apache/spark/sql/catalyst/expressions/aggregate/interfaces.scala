@@ -397,6 +397,50 @@ abstract class DeclarativeAggregate
   }
 }
 
+/**
+ * A case class wrapping a `DeclarativeAggregate`, using optimized verions of update expessions.
+ */
+case class WrappedDeclarativeAggregate(
+    original: DeclarativeAggregate,
+    updateExpressions: Seq[Expression]) extends DeclarativeAggregate {
+
+  /**
+    * Expressions for initializing empty aggregation buffers.
+    */
+  override lazy val initialValues: Seq[Expression] = original.initialValues
+
+  /**
+    * A sequence of expressions for merging two aggregation buffers together. When defining these
+    * expressions, you can use the syntax `attributeName.left` and `attributeName.right` to refer
+    * to the attributes corresponding to each of the buffers being merged (this magic is enabled
+    * by the [[RichAttribute]] implicit class).
+    */
+  override lazy val mergeExpressions: Seq[Expression] = original.mergeExpressions
+
+  /**
+    * An expression which returns the final value for this aggregate function. Its data type should
+    * match this expression's [[dataType]].
+    */
+  override lazy val evaluateExpression: Expression = original.evaluateExpression
+
+  /** Attributes of fields in aggBufferSchema. */
+  override def aggBufferAttributes: Seq[AttributeReference] = original.aggBufferAttributes
+
+  override def nullable: Boolean = original.nullable
+
+  /**
+   * Returns the [[DataType]] of the result of evaluating this expression.  It is
+   * invalid to query the dataType of an unresolved expression (i.e., when `resolved` == false).
+   */
+  override def dataType: DataType = original.dataType
+
+  /**
+   * Returns a Seq of the children of this node.
+   * Children should not change. Immutability required for containsChild optimization
+   */
+  override def children: Seq[Expression] = original.children
+}
+
 
 /**
  * Aggregation function which allows **arbitrary** user-defined java object to be used as internal

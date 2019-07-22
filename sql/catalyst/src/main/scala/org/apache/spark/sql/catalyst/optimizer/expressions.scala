@@ -35,22 +35,56 @@ import org.apache.spark.sql.types._
  * Optimization rules defined in this file should not affect the structure of the logical plan.
  */
 
+/**
+ * A `trait` which performs optimizations on expressions.
+ */
+trait ExpressionOptimizerRule extends Rule[LogicalPlan] {
+  /**
+   * The `PartialFunction` to apply to all expression of the plan to optimize.
+   */
+  protected def expressionRule: PartialFunction[Expression, Expression]
+
+  /**
+   * Whether to transform the expression top-down (if true, default) or bottom-up.
+   */
+  protected def applyDown: Boolean = true
+
+  /**
+   * Applies the `expressionRule` on a plan.
+   */
+  final def apply(plan: LogicalPlan): LogicalPlan = if (applyDown) {
+    plan transform {
+      case q: LogicalPlan => q transformExpressionsDown expressionRule
+    }
+  } else {
+    plan transform {
+      case q: LogicalPlan => q transformExpressionsUp expressionRule
+    }
+  }
+
+  /**
+   * Applies the `expressionRule` on expression.
+   */
+  final def applyOnExpression(expression: Expression): Expression = if (applyDown) {
+    expression.transformDown(expressionRule)
+  } else {
+    expression.transformUp(expressionRule)
+  }
+}
 
 /**
  * Replaces [[Expression Expressions]] that can be statically evaluated with
  * equivalent [[Literal]] values.
  */
-object ConstantFolding extends Rule[LogicalPlan] {
-  def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    case q: LogicalPlan => q transformExpressionsDown {
-      // Skip redundant folding of literals. This rule is technically not necessary. Placing this
-      // here avoids running the next rule for Literal values, which would create a new Literal
-      // object and running eval unnecessarily.
-      case l: Literal => l
+object ConstantFolding extends ExpressionOptimizerRule {
+  override protected val expressionRule: PartialFunction[Expression, Expression] = {
+    // Skip redundant folding of literals. This rule is technically not necessary. Placing this
+    // here avoids running the next rule for Literal values, which would create a new Literal
+    // object and running eval unnecessarily.
+    case l: Literal => l
 
-      // Fold expressions that are foldable.
-      case e if e.foldable => Literal.create(e.eval(EmptyRow), e.dataType)
-    }
+    // Fold expressions that are foldable.
+    case e if e.foldable => Literal.create(e.eval(EmptyRow), e.dataType)
   }
 }
 
@@ -215,30 +249,28 @@ object ReorderAssociativeOperator extends Rule[LogicalPlan] {
  * 3. Replaces [[In (value, seq[Literal])]] with optimized version
  *    [[InSet (value, HashSet[Literal])]] which is much faster.
  */
-object OptimizeIn extends Rule[LogicalPlan] {
-  def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    case q: LogicalPlan => q transformExpressionsDown {
-      case In(v, list) if list.isEmpty =>
-        // When v is not nullable, the following expression will be optimized
-        // to FalseLiteral which is tested in OptimizeInSuite.scala
-        If(IsNotNull(v), FalseLiteral, Literal(null, BooleanType))
-      case expr @ In(v, list) if expr.inSetConvertible =>
-        val newList = ExpressionSet(list).toSeq
-        if (newList.length == 1
-          // TODO: `EqualTo` for structural types are not working. Until SPARK-24443 is addressed,
-          // TODO: we exclude them in this rule.
-          && !v.isInstanceOf[CreateNamedStructLike]
-          && !newList.head.isInstanceOf[CreateNamedStructLike]) {
-          EqualTo(v, newList.head)
-        } else if (newList.length > SQLConf.get.optimizerInSetConversionThreshold) {
-          val hSet = newList.map(e => e.eval(EmptyRow))
-          InSet(v, HashSet() ++ hSet)
-        } else if (newList.length < list.length) {
-          expr.copy(list = newList)
-        } else { // newList.length == list.length && newList.length > 1
-          expr
-        }
-    }
+object OptimizeIn extends ExpressionOptimizerRule {
+  override protected val expressionRule: PartialFunction[Expression, Expression] = {
+    case In(v, list) if list.isEmpty =>
+      // When v is not nullable, the following expression will be optimized
+      // to FalseLiteral which is tested in OptimizeInSuite.scala
+      If(IsNotNull(v), FalseLiteral, Literal(null, BooleanType))
+    case expr @ In(v, list) if expr.inSetConvertible =>
+      val newList = ExpressionSet(list).toSeq
+      if (newList.length == 1
+        // TODO: `EqualTo` for structural types are not working. Until SPARK-24443 is addressed,
+        // TODO: we exclude them in this rule.
+        && !v.isInstanceOf[CreateNamedStructLike]
+        && !newList.head.isInstanceOf[CreateNamedStructLike]) {
+        EqualTo(v, newList.head)
+      } else if (newList.length > SQLConf.get.optimizerInSetConversionThreshold) {
+        val hSet = newList.map(e => e.eval(EmptyRow))
+        InSet(v, HashSet() ++ hSet)
+      } else if (newList.length < list.length) {
+        expr.copy(list = newList)
+      } else { // newList.length == list.length && newList.length > 1
+        expr
+      }
   }
 }
 
@@ -250,130 +282,129 @@ object OptimizeIn extends Rule[LogicalPlan] {
  * 3. Merge same expressions
  * 4. Removes `Not` operator.
  */
-object BooleanSimplification extends Rule[LogicalPlan] with PredicateHelper {
-  def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    case q: LogicalPlan => q transformExpressionsUp {
-      case TrueLiteral And e => e
-      case e And TrueLiteral => e
-      case FalseLiteral Or e => e
-      case e Or FalseLiteral => e
+object BooleanSimplification extends ExpressionOptimizerRule with PredicateHelper {
+  override protected def applyDown: Boolean = false
+  override protected val expressionRule: PartialFunction[Expression, Expression] = {
+    case TrueLiteral And e => e
+    case e And TrueLiteral => e
+    case FalseLiteral Or e => e
+    case e Or FalseLiteral => e
 
-      case FalseLiteral And _ => FalseLiteral
-      case _ And FalseLiteral => FalseLiteral
-      case TrueLiteral Or _ => TrueLiteral
-      case _ Or TrueLiteral => TrueLiteral
+    case FalseLiteral And _ => FalseLiteral
+    case _ And FalseLiteral => FalseLiteral
+    case TrueLiteral Or _ => TrueLiteral
+    case _ Or TrueLiteral => TrueLiteral
 
-      case a And b if Not(a).semanticEquals(b) =>
-        If(IsNull(a), Literal.create(null, a.dataType), FalseLiteral)
-      case a And b if a.semanticEquals(Not(b)) =>
-        If(IsNull(b), Literal.create(null, b.dataType), FalseLiteral)
+    case a And b if Not(a).semanticEquals(b) =>
+      If(IsNull(a), Literal.create(null, a.dataType), FalseLiteral)
+    case a And b if a.semanticEquals(Not(b)) =>
+      If(IsNull(b), Literal.create(null, b.dataType), FalseLiteral)
 
-      case a Or b if Not(a).semanticEquals(b) =>
-        If(IsNull(a), Literal.create(null, a.dataType), TrueLiteral)
-      case a Or b if a.semanticEquals(Not(b)) =>
-        If(IsNull(b), Literal.create(null, b.dataType), TrueLiteral)
+    case a Or b if Not(a).semanticEquals(b) =>
+      If(IsNull(a), Literal.create(null, a.dataType), TrueLiteral)
+    case a Or b if a.semanticEquals(Not(b)) =>
+      If(IsNull(b), Literal.create(null, b.dataType), TrueLiteral)
 
-      case a And b if a.semanticEquals(b) => a
-      case a Or b if a.semanticEquals(b) => a
+    case a And b if a.semanticEquals(b) => a
+    case a Or b if a.semanticEquals(b) => a
 
-      // The following optimizations are applicable only when the operands are not nullable,
-      // since the three-value logic of AND and OR are different in NULL handling.
-      // See the chart:
-      // +---------+---------+---------+---------+
-      // | operand | operand |   OR    |   AND   |
-      // +---------+---------+---------+---------+
-      // | TRUE    | TRUE    | TRUE    | TRUE    |
-      // | TRUE    | FALSE   | TRUE    | FALSE   |
-      // | FALSE   | FALSE   | FALSE   | FALSE   |
-      // | UNKNOWN | TRUE    | TRUE    | UNKNOWN |
-      // | UNKNOWN | FALSE   | UNKNOWN | FALSE   |
-      // | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
-      // +---------+---------+---------+---------+
+    // The following optimizations are applicable only when the operands are not nullable,
+    // since the three-value logic of AND and OR are different in NULL handling.
+    // See the chart:
+    // +---------+---------+---------+---------+
+    // | operand | operand |   OR    |   AND   |
+    // +---------+---------+---------+---------+
+    // | TRUE    | TRUE    | TRUE    | TRUE    |
+    // | TRUE    | FALSE   | TRUE    | FALSE   |
+    // | FALSE   | FALSE   | FALSE   | FALSE   |
+    // | UNKNOWN | TRUE    | TRUE    | UNKNOWN |
+    // | UNKNOWN | FALSE   | UNKNOWN | FALSE   |
+    // | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
+    // +---------+---------+---------+---------+
 
-      // (NULL And (NULL Or FALSE)) = NULL, but (NULL And FALSE) = FALSE. Thus, a can't be nullable.
-      case a And (b Or c) if !a.nullable && Not(a).semanticEquals(b) => And(a, c)
-      // (NULL And (FALSE Or NULL)) = NULL, but (NULL And FALSE) = FALSE. Thus, a can't be nullable.
-      case a And (b Or c) if !a.nullable && Not(a).semanticEquals(c) => And(a, b)
-      // ((NULL Or FALSE) And NULL) = NULL, but (FALSE And NULL) = FALSE. Thus, c can't be nullable.
-      case (a Or b) And c if !c.nullable && a.semanticEquals(Not(c)) => And(b, c)
-      // ((FALSE Or NULL) And NULL) = NULL, but (FALSE And NULL) = FALSE. Thus, c can't be nullable.
-      case (a Or b) And c if !c.nullable && b.semanticEquals(Not(c)) => And(a, c)
+    // (NULL And (NULL Or FALSE)) = NULL, but (NULL And FALSE) = FALSE. Thus, a can't be nullable.
+    case a And (b Or c) if !a.nullable && Not(a).semanticEquals(b) => And(a, c)
+    // (NULL And (FALSE Or NULL)) = NULL, but (NULL And FALSE) = FALSE. Thus, a can't be nullable.
+    case a And (b Or c) if !a.nullable && Not(a).semanticEquals(c) => And(a, b)
+    // ((NULL Or FALSE) And NULL) = NULL, but (FALSE And NULL) = FALSE. Thus, c can't be nullable.
+    case (a Or b) And c if !c.nullable && a.semanticEquals(Not(c)) => And(b, c)
+    // ((FALSE Or NULL) And NULL) = NULL, but (FALSE And NULL) = FALSE. Thus, c can't be nullable.
+    case (a Or b) And c if !c.nullable && b.semanticEquals(Not(c)) => And(a, c)
 
-      // (NULL Or (NULL And TRUE)) = NULL, but (NULL Or TRUE) = TRUE. Thus, a can't be nullable.
-      case a Or (b And c) if !a.nullable && Not(a).semanticEquals(b) => Or(a, c)
-      // (NULL Or (TRUE And NULL)) = NULL, but (NULL Or TRUE) = TRUE. Thus, a can't be nullable.
-      case a Or (b And c) if !a.nullable && Not(a).semanticEquals(c) => Or(a, b)
-      // ((NULL And TRUE) Or NULL) = NULL, but (TRUE Or NULL) = TRUE. Thus, c can't be nullable.
-      case (a And b) Or c if !c.nullable && a.semanticEquals(Not(c)) => Or(b, c)
-      // ((TRUE And NULL) Or NULL) = NULL, but (TRUE Or NULL) = TRUE. Thus, c can't be nullable.
-      case (a And b) Or c if !c.nullable && b.semanticEquals(Not(c)) => Or(a, c)
+    // (NULL Or (NULL And TRUE)) = NULL, but (NULL Or TRUE) = TRUE. Thus, a can't be nullable.
+    case a Or (b And c) if !a.nullable && Not(a).semanticEquals(b) => Or(a, c)
+    // (NULL Or (TRUE And NULL)) = NULL, but (NULL Or TRUE) = TRUE. Thus, a can't be nullable.
+    case a Or (b And c) if !a.nullable && Not(a).semanticEquals(c) => Or(a, b)
+    // ((NULL And TRUE) Or NULL) = NULL, but (TRUE Or NULL) = TRUE. Thus, c can't be nullable.
+    case (a And b) Or c if !c.nullable && a.semanticEquals(Not(c)) => Or(b, c)
+    // ((TRUE And NULL) Or NULL) = NULL, but (TRUE Or NULL) = TRUE. Thus, c can't be nullable.
+    case (a And b) Or c if !c.nullable && b.semanticEquals(Not(c)) => Or(a, c)
 
-      // Common factor elimination for conjunction
-      case and @ (left And right) =>
-        // 1. Split left and right to get the disjunctive predicates,
-        //   i.e. lhs = (a, b), rhs = (a, c)
-        // 2. Find the common predict between lhsSet and rhsSet, i.e. common = (a)
-        // 3. Remove common predict from lhsSet and rhsSet, i.e. ldiff = (b), rdiff = (c)
-        // 4. Apply the formula, get the optimized predicate: common || (ldiff && rdiff)
-        val lhs = splitDisjunctivePredicates(left)
-        val rhs = splitDisjunctivePredicates(right)
-        val common = lhs.filter(e => rhs.exists(e.semanticEquals))
-        if (common.isEmpty) {
-          // No common factors, return the original predicate
-          and
+    // Common factor elimination for conjunction
+    case and @ (left And right) =>
+      // 1. Split left and right to get the disjunctive predicates,
+      //   i.e. lhs = (a, b), rhs = (a, c)
+      // 2. Find the common predict between lhsSet and rhsSet, i.e. common = (a)
+      // 3. Remove common predict from lhsSet and rhsSet, i.e. ldiff = (b), rdiff = (c)
+      // 4. Apply the formula, get the optimized predicate: common || (ldiff && rdiff)
+      val lhs = splitDisjunctivePredicates(left)
+      val rhs = splitDisjunctivePredicates(right)
+      val common = lhs.filter(e => rhs.exists(e.semanticEquals))
+      if (common.isEmpty) {
+        // No common factors, return the original predicate
+        and
+      } else {
+        val ldiff = lhs.filterNot(e => common.exists(e.semanticEquals))
+        val rdiff = rhs.filterNot(e => common.exists(e.semanticEquals))
+        if (ldiff.isEmpty || rdiff.isEmpty) {
+          // (a || b || c || ...) && (a || b) => (a || b)
+          common.reduce(Or)
         } else {
-          val ldiff = lhs.filterNot(e => common.exists(e.semanticEquals))
-          val rdiff = rhs.filterNot(e => common.exists(e.semanticEquals))
-          if (ldiff.isEmpty || rdiff.isEmpty) {
-            // (a || b || c || ...) && (a || b) => (a || b)
-            common.reduce(Or)
-          } else {
-            // (a || b || c || ...) && (a || b || d || ...) =>
-            // ((c || ...) && (d || ...)) || a || b
-            (common :+ And(ldiff.reduce(Or), rdiff.reduce(Or))).reduce(Or)
-          }
+          // (a || b || c || ...) && (a || b || d || ...) =>
+          // ((c || ...) && (d || ...)) || a || b
+          (common :+ And(ldiff.reduce(Or), rdiff.reduce(Or))).reduce(Or)
         }
+      }
 
-      // Common factor elimination for disjunction
-      case or @ (left Or right) =>
-        // 1. Split left and right to get the conjunctive predicates,
-        //   i.e.  lhs = (a, b), rhs = (a, c)
-        // 2. Find the common predict between lhsSet and rhsSet, i.e. common = (a)
-        // 3. Remove common predict from lhsSet and rhsSet, i.e. ldiff = (b), rdiff = (c)
-        // 4. Apply the formula, get the optimized predicate: common && (ldiff || rdiff)
-        val lhs = splitConjunctivePredicates(left)
-        val rhs = splitConjunctivePredicates(right)
-        val common = lhs.filter(e => rhs.exists(e.semanticEquals))
-        if (common.isEmpty) {
-          // No common factors, return the original predicate
-          or
+    // Common factor elimination for disjunction
+    case or @ (left Or right) =>
+      // 1. Split left and right to get the conjunctive predicates,
+      //   i.e.  lhs = (a, b), rhs = (a, c)
+      // 2. Find the common predict between lhsSet and rhsSet, i.e. common = (a)
+      // 3. Remove common predict from lhsSet and rhsSet, i.e. ldiff = (b), rdiff = (c)
+      // 4. Apply the formula, get the optimized predicate: common && (ldiff || rdiff)
+      val lhs = splitConjunctivePredicates(left)
+      val rhs = splitConjunctivePredicates(right)
+      val common = lhs.filter(e => rhs.exists(e.semanticEquals))
+      if (common.isEmpty) {
+        // No common factors, return the original predicate
+        or
+      } else {
+        val ldiff = lhs.filterNot(e => common.exists(e.semanticEquals))
+        val rdiff = rhs.filterNot(e => common.exists(e.semanticEquals))
+        if (ldiff.isEmpty || rdiff.isEmpty) {
+          // (a && b) || (a && b && c && ...) => a && b
+          common.reduce(And)
         } else {
-          val ldiff = lhs.filterNot(e => common.exists(e.semanticEquals))
-          val rdiff = rhs.filterNot(e => common.exists(e.semanticEquals))
-          if (ldiff.isEmpty || rdiff.isEmpty) {
-            // (a && b) || (a && b && c && ...) => a && b
-            common.reduce(And)
-          } else {
-            // (a && b && c && ...) || (a && b && d && ...) =>
-            // ((c && ...) || (d && ...)) && a && b
-            (common :+ Or(ldiff.reduce(And), rdiff.reduce(And))).reduce(And)
-          }
+          // (a && b && c && ...) || (a && b && d && ...) =>
+          // ((c && ...) || (d && ...)) && a && b
+          (common :+ Or(ldiff.reduce(And), rdiff.reduce(And))).reduce(And)
         }
+      }
 
-      case Not(TrueLiteral) => FalseLiteral
-      case Not(FalseLiteral) => TrueLiteral
+    case Not(TrueLiteral) => FalseLiteral
+    case Not(FalseLiteral) => TrueLiteral
 
-      case Not(a GreaterThan b) => LessThanOrEqual(a, b)
-      case Not(a GreaterThanOrEqual b) => LessThan(a, b)
+    case Not(a GreaterThan b) => LessThanOrEqual(a, b)
+    case Not(a GreaterThanOrEqual b) => LessThan(a, b)
 
-      case Not(a LessThan b) => GreaterThanOrEqual(a, b)
-      case Not(a LessThanOrEqual b) => GreaterThan(a, b)
+    case Not(a LessThan b) => GreaterThanOrEqual(a, b)
+    case Not(a LessThanOrEqual b) => GreaterThan(a, b)
 
-      case Not(a Or b) => And(Not(a), Not(b))
-      case Not(a And b) => Or(Not(a), Not(b))
+    case Not(a Or b) => And(Not(a), Not(b))
+    case Not(a And b) => Or(Not(a), Not(b))
 
-      case Not(Not(e)) => e
-    }
+    case Not(Not(e)) => e
   }
 }
 
@@ -384,20 +415,19 @@ object BooleanSimplification extends Rule[LogicalPlan] with PredicateHelper {
  * 2) Replace '=', '<=', and '>=' with 'true' literal if both operands are non-nullable.
  * 3) Replace '<' and '>' with 'false' literal if both operands are non-nullable.
  */
-object SimplifyBinaryComparison extends Rule[LogicalPlan] with PredicateHelper {
-  def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    case q: LogicalPlan => q transformExpressionsUp {
-      // True with equality
-      case a EqualNullSafe b if a.semanticEquals(b) => TrueLiteral
-      case a EqualTo b if !a.nullable && !b.nullable && a.semanticEquals(b) => TrueLiteral
-      case a GreaterThanOrEqual b if !a.nullable && !b.nullable && a.semanticEquals(b) =>
-        TrueLiteral
-      case a LessThanOrEqual b if !a.nullable && !b.nullable && a.semanticEquals(b) => TrueLiteral
+object SimplifyBinaryComparison extends ExpressionOptimizerRule with PredicateHelper {
+  override protected def applyDown: Boolean = false
+  override protected val expressionRule: PartialFunction[Expression, Expression] = {
+    // True with equality
+    case a EqualNullSafe b if a.semanticEquals(b) => TrueLiteral
+    case a EqualTo b if !a.nullable && !b.nullable && a.semanticEquals(b) => TrueLiteral
+    case a GreaterThanOrEqual b if !a.nullable && !b.nullable && a.semanticEquals(b) =>
+      TrueLiteral
+    case a LessThanOrEqual b if !a.nullable && !b.nullable && a.semanticEquals(b) => TrueLiteral
 
-      // False with inequality
-      case a GreaterThan b if !a.nullable && !b.nullable && a.semanticEquals(b) => FalseLiteral
-      case a LessThan b if !a.nullable && !b.nullable && a.semanticEquals(b) => FalseLiteral
-    }
+    // False with inequality
+    case a GreaterThan b if !a.nullable && !b.nullable && a.semanticEquals(b) => FalseLiteral
+    case a LessThan b if !a.nullable && !b.nullable && a.semanticEquals(b) => FalseLiteral
   }
 }
 
@@ -405,63 +435,62 @@ object SimplifyBinaryComparison extends Rule[LogicalPlan] with PredicateHelper {
 /**
  * Simplifies conditional expressions (if / case).
  */
-object SimplifyConditionals extends Rule[LogicalPlan] with PredicateHelper {
+object SimplifyConditionals extends ExpressionOptimizerRule with PredicateHelper {
   private def falseOrNullLiteral(e: Expression): Boolean = e match {
     case FalseLiteral => true
     case Literal(null, _) => true
     case _ => false
   }
 
-  def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    case q: LogicalPlan => q transformExpressionsUp {
-      case If(TrueLiteral, trueValue, _) => trueValue
-      case If(FalseLiteral, _, falseValue) => falseValue
-      case If(Literal(null, _), _, falseValue) => falseValue
-      case If(cond, trueValue, falseValue)
-        if cond.deterministic && trueValue.semanticEquals(falseValue) => trueValue
+  override protected def applyDown: Boolean = false
+  override protected val expressionRule: PartialFunction[Expression, Expression] = {
+    case If(TrueLiteral, trueValue, _) => trueValue
+    case If(FalseLiteral, _, falseValue) => falseValue
+    case If(Literal(null, _), _, falseValue) => falseValue
+    case If(cond, trueValue, falseValue)
+      if cond.deterministic && trueValue.semanticEquals(falseValue) => trueValue
 
-      case e @ CaseWhen(branches, elseValue) if branches.exists(x => falseOrNullLiteral(x._1)) =>
-        // If there are branches that are always false, remove them.
-        // If there are no more branches left, just use the else value.
-        // Note that these two are handled together here in a single case statement because
-        // otherwise we cannot determine the data type for the elseValue if it is None (i.e. null).
-        val newBranches = branches.filter(x => !falseOrNullLiteral(x._1))
-        if (newBranches.isEmpty) {
-          elseValue.getOrElse(Literal.create(null, e.dataType))
-        } else {
-          e.copy(branches = newBranches)
+    case e @ CaseWhen(branches, elseValue) if branches.exists(x => falseOrNullLiteral(x._1)) =>
+      // If there are branches that are always false, remove them.
+      // If there are no more branches left, just use the else value.
+      // Note that these two are handled together here in a single case statement because
+      // otherwise we cannot determine the data type for the elseValue if it is None (i.e. null).
+      val newBranches = branches.filter(x => !falseOrNullLiteral(x._1))
+      if (newBranches.isEmpty) {
+        elseValue.getOrElse(Literal.create(null, e.dataType))
+      } else {
+        e.copy(branches = newBranches)
+      }
+
+    case CaseWhen(branches, _) if branches.headOption.map(_._1).contains(TrueLiteral) =>
+      // If the first branch is a true literal, remove the entire CaseWhen and use the value
+      // from that. Note that CaseWhen.branches should never be empty, and as a result the
+      // headOption (rather than head) added above is just an extra (and unnecessary) safeguard.
+      branches.head._2
+
+    case CaseWhen(branches, _) if branches.exists(_._1 == TrueLiteral) =>
+      // a branch with a true condition eliminates all following branches,
+      // these branches can be pruned away
+      val (h, t) = branches.span(_._1 != TrueLiteral)
+      CaseWhen( h :+ t.head, None)
+
+    case e @ CaseWhen(branches, Some(elseValue))
+        if branches.forall(_._2.semanticEquals(elseValue)) =>
+      // For non-deterministic conditions with side effect, we can not remove it, or change
+      // the ordering. As a result, we try to remove the deterministic conditions from the tail.
+      var hitNonDeterministicCond = false
+      var i = branches.length
+      while (i > 0 && !hitNonDeterministicCond) {
+        hitNonDeterministicCond = !branches(i - 1)._1.deterministic
+        if (!hitNonDeterministicCond) {
+          i -= 1
         }
-
-      case CaseWhen(branches, _) if branches.headOption.map(_._1).contains(TrueLiteral) =>
-        // If the first branch is a true literal, remove the entire CaseWhen and use the value
-        // from that. Note that CaseWhen.branches should never be empty, and as a result the
-        // headOption (rather than head) added above is just an extra (and unnecessary) safeguard.
-        branches.head._2
-
-      case CaseWhen(branches, _) if branches.exists(_._1 == TrueLiteral) =>
-        // a branch with a true condition eliminates all following branches,
-        // these branches can be pruned away
-        val (h, t) = branches.span(_._1 != TrueLiteral)
-        CaseWhen( h :+ t.head, None)
-
-      case e @ CaseWhen(branches, Some(elseValue))
-          if branches.forall(_._2.semanticEquals(elseValue)) =>
-        // For non-deterministic conditions with side effect, we can not remove it, or change
-        // the ordering. As a result, we try to remove the deterministic conditions from the tail.
-        var hitNonDeterministicCond = false
-        var i = branches.length
-        while (i > 0 && !hitNonDeterministicCond) {
-          hitNonDeterministicCond = !branches(i - 1)._1.deterministic
-          if (!hitNonDeterministicCond) {
-            i -= 1
-          }
-        }
-        if (i == 0) {
-          elseValue
-        } else {
-          e.copy(branches = branches.take(i).map(branch => (branch._1, elseValue)))
-        }
-    }
+      }
+      if (i == 0) {
+        elseValue
+      } else {
+        e.copy(branches = branches.take(i).map(branch => (branch._1, elseValue)))
+      }
   }
 }
 
@@ -471,7 +500,7 @@ object SimplifyConditionals extends Rule[LogicalPlan] with PredicateHelper {
  * For example, when the expression is just checking to see if a string starts with a given
  * pattern.
  */
-object LikeSimplification extends Rule[LogicalPlan] {
+object LikeSimplification extends ExpressionOptimizerRule {
   // if guards below protect from escapes on trailing %.
   // Cases like "something\%" are not optimized, but this does not affect correctness.
   private val startsWith = "([^_%]+)%".r
@@ -480,7 +509,7 @@ object LikeSimplification extends Rule[LogicalPlan] {
   private val contains = "%([^_%]+)%".r
   private val equalTo = "([^_%]*)".r
 
-  def apply(plan: LogicalPlan): LogicalPlan = plan transformAllExpressions {
+  override protected val expressionRule: PartialFunction[Expression, Expression] = {
     case Like(input, Literal(pattern, StringType)) =>
       if (pattern == null) {
         // If pattern is null, return null value directly, since "col like null" == null.
@@ -513,50 +542,58 @@ object LikeSimplification extends Rule[LogicalPlan] {
  * equivalent [[Literal]] values. This rule is more specific with
  * Null value propagation from bottom to top of the expression tree.
  */
-object NullPropagation extends Rule[LogicalPlan] {
+object NullPropagation extends ExpressionOptimizerRule {
   private def isNullLiteral(e: Expression): Boolean = e match {
     case Literal(null, _) => true
     case _ => false
   }
+  override protected def applyDown: Boolean = false
+  override protected val expressionRule: PartialFunction[Expression, Expression] = {
+    case e @ WindowExpression(Cast(Literal(0L, _), _, _), _) =>
+      Cast(Literal(0L), e.dataType, Option(SQLConf.get.sessionLocalTimeZone))
+    case e @ AggregateExpression(Count(exprs), _, _, _) if exprs.forall(isNullLiteral) =>
+      Cast(Literal(0L), e.dataType, Option(SQLConf.get.sessionLocalTimeZone))
+    case ae @ AggregateExpression(Count(exprs), _, false, _) if !exprs.exists(_.nullable) =>
+      // This rule should be only triggered when isDistinct field is false.
+      ae.copy(aggregateFunction = Count(Literal(1)))
 
-  def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    case q: LogicalPlan => q transformExpressionsUp {
-      case e @ WindowExpression(Cast(Literal(0L, _), _, _), _) =>
-        Cast(Literal(0L), e.dataType, Option(SQLConf.get.sessionLocalTimeZone))
-      case e @ AggregateExpression(Count(exprs), _, _, _) if exprs.forall(isNullLiteral) =>
-        Cast(Literal(0L), e.dataType, Option(SQLConf.get.sessionLocalTimeZone))
-      case ae @ AggregateExpression(Count(exprs), _, false, _) if !exprs.exists(_.nullable) =>
-        // This rule should be only triggered when isDistinct field is false.
-        ae.copy(aggregateFunction = Count(Literal(1)))
+    case IsNull(c) if !c.nullable => Literal.create(false, BooleanType)
+    case IsNotNull(c) if !c.nullable => Literal.create(true, BooleanType)
 
-      case IsNull(c) if !c.nullable => Literal.create(false, BooleanType)
-      case IsNotNull(c) if !c.nullable => Literal.create(true, BooleanType)
+    case EqualNullSafe(Literal(null, _), r) => IsNull(r)
+    case EqualNullSafe(l, Literal(null, _)) => IsNull(l)
 
-      case EqualNullSafe(Literal(null, _), r) => IsNull(r)
-      case EqualNullSafe(l, Literal(null, _)) => IsNull(l)
+    case AssertNotNull(c, _) if !c.nullable => c
 
-      case AssertNotNull(c, _) if !c.nullable => c
-
-      // For Coalesce, remove null literals.
-      case e @ Coalesce(children) =>
-        val newChildren = children.filterNot(isNullLiteral)
-        if (newChildren.isEmpty) {
-          Literal.create(null, e.dataType)
-        } else if (newChildren.length == 1) {
-          newChildren.head
-        } else {
-          Coalesce(newChildren)
+    // For Coalesce, remove null literals and remove the expressions coming after the first
+    // non-nullable one
+    case e @ Coalesce(children) =>
+      val newChildren = new ArrayBuffer[Expression]
+      var foundNotNullable = false
+      val it = children.iterator
+      while (!foundNotNullable && it.hasNext) {
+        val e = it.next()
+        if (!isNullLiteral(e)) {
+          newChildren.append(e)
+          foundNotNullable = !e.nullable
         }
-
-      // If the value expression is NULL then transform the In expression to null literal.
-      case In(Literal(null, _), _) => Literal.create(null, BooleanType)
-      case InSubquery(Seq(Literal(null, _)), _) => Literal.create(null, BooleanType)
-
-      // Non-leaf NullIntolerant expressions will return null, if at least one of its children is
-      // a null literal.
-      case e: NullIntolerant if e.children.exists(isNullLiteral) =>
+      }
+      if (newChildren.isEmpty) {
         Literal.create(null, e.dataType)
-    }
+      } else if (newChildren.length == 1) {
+        newChildren.head
+      } else {
+        Coalesce(newChildren.result())
+      }
+
+    // If the value expression is NULL then transform the In expression to null literal.
+    case In(Literal(null, _), _) => Literal.create(null, BooleanType)
+    case InSubquery(Seq(Literal(null, _)), _) => Literal.create(null, BooleanType)
+
+    // Non-leaf NullIntolerant expressions will return null, if at least one of its children is
+    // a null literal.
+    case e: NullIntolerant if e.children.exists(isNullLiteral) =>
+      Literal.create(null, e.dataType)
   }
 }
 
@@ -660,8 +697,8 @@ object FoldablePropagation extends Rule[LogicalPlan] {
 /**
  * Removes [[Cast Casts]] that are unnecessary because the input is already the correct type.
  */
-object SimplifyCasts extends Rule[LogicalPlan] {
-  def apply(plan: LogicalPlan): LogicalPlan = plan transformAllExpressions {
+object SimplifyCasts extends ExpressionOptimizerRule {
+  override protected val expressionRule: PartialFunction[Expression, Expression] = {
     case Cast(e, dataType, _) if e.dataType == dataType => e
     case c @ Cast(e, dataType, _) => (e.dataType, dataType) match {
       case (ArrayType(from, false), ArrayType(to, true)) if from == to => e
@@ -676,8 +713,8 @@ object SimplifyCasts extends Rule[LogicalPlan] {
 /**
  * Removes nodes that are not necessary.
  */
-object RemoveDispensableExpressions extends Rule[LogicalPlan] {
-  def apply(plan: LogicalPlan): LogicalPlan = plan transformAllExpressions {
+object RemoveDispensableExpressions extends ExpressionOptimizerRule {
+  override protected val expressionRule: PartialFunction[Expression, Expression] = {
     case UnaryPositive(child) => child
   }
 }
@@ -687,14 +724,13 @@ object RemoveDispensableExpressions extends Rule[LogicalPlan] {
  * Removes the inner case conversion expressions that are unnecessary because
  * the inner conversion is overwritten by the outer one.
  */
-object SimplifyCaseConversionExpressions extends Rule[LogicalPlan] {
-  def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    case q: LogicalPlan => q transformExpressionsUp {
-      case Upper(Upper(child)) => Upper(child)
-      case Upper(Lower(child)) => Upper(child)
-      case Lower(Upper(child)) => Lower(child)
-      case Lower(Lower(child)) => Lower(child)
-    }
+object SimplifyCaseConversionExpressions extends ExpressionOptimizerRule {
+  override protected def applyDown: Boolean = false
+  override protected val expressionRule: PartialFunction[Expression, Expression] = {
+    case Upper(Upper(child)) => Upper(child)
+    case Upper(Lower(child)) => Upper(child)
+    case Lower(Upper(child)) => Lower(child)
+    case Lower(Lower(child)) => Lower(child)
   }
 }
 
